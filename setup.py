@@ -65,6 +65,7 @@ setup_args = {
         'xvfbwrapper',
         'funcparserlib',
         'Pillow > 2.0',
+        'redis',
     ],
     'classifiers': [
         'Programming Language :: Python',

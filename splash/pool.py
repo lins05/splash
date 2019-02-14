@@ -1,3 +1,10 @@
+import os
+import json
+import uuid
+import time
+
+import redis
+
 from twisted.internet import defer
 from twisted.python import log
 
@@ -15,6 +22,17 @@ class RenderPool(object):
         self.verbosity = verbosity
         for n in range(slots):
             self._wait_for_render(None, n, log=False)
+
+        self.debug_key = 'splash-urls-{}'.format(os.environ.get('MESOS_TASK_ID', str(uuid.uuid4())))
+        redis_host = os.environ.get('REDIS_HOST', '127.0.0.1')
+        redis_port = int(os.environ.get('REDIS_PORT') or 6379)
+        log.msg('redis host %s, redis port %s' % (redis_host, redis_port), system='debug-urls')
+        self.debug_dbc = redis.StrictRedis(
+            host=redis_host,
+            port=redis_port,
+            socket_connect_timeout=10,
+            socket_timeout=10,
+            db=0)
 
     def render(self, rendercls, render_options, proxy, **kwargs):
         splash_proxy_factory = self.splash_proxy_factory_cls(proxy)
@@ -42,6 +60,7 @@ class RenderPool(object):
             verbosity=self.verbosity,
         )
         self.active.add(render)
+        self.debug_update()
         render.deferred.chainDeferred(pool_d)
         pool_d.addErrback(self._error, render, slot)
         pool_d.addBoth(self._close_render, render, slot)
@@ -65,6 +84,7 @@ class RenderPool(object):
         uid = render.render_options.get_uid()
         self.log("[%s] SLOT %d is closing %s" % (uid, slot, render))
         self.active.remove(render)
+        self.debug_update()
         render.deferred.cancel()
         render.close()
         self.log("[%s] SLOT %d done with %s" % (uid, slot, render))
@@ -73,3 +93,19 @@ class RenderPool(object):
     def log(self, text):
         if self.verbosity >= 2:
             log.msg(text, system='pool')
+
+    def debug_update(self):
+        """
+        Save active requests to redis for debugging which could crash the
+        splash instance.
+        """
+        urls = [render.render_options.get_url() for render in self.active]
+        debug_data = {
+            # Save the ts so we can tell crashed splash instances
+            'ts': int(time.time()),
+            'urls': urls,
+        }
+        try:
+            self.debug_dbc.set(self.debug_key, json.dumps(debug_data).encode())
+        except Exception as e:
+            log.msg('debug_update failed: %s' % str(e), system='debug-urls')
